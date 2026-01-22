@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <zlib.h>
 #include <openssl/sha.h>
+#include <ctime>
 
 // --- Helper Functions ---
 
@@ -97,7 +98,7 @@ std::string hex_to_raw(const std::string& hex) {
     return raw;
 }
 
-// Helper to write any object (blob or tree) to .git/objects
+// Helper to write any object (blob, tree, commit) to .git/objects
 // Returns the SHA hash of the written object
 std::string save_object_to_disk(const std::string& content, const std::string& type) {
     std::string header = type + " " + std::to_string(content.size()) + '\0';
@@ -110,7 +111,6 @@ std::string save_object_to_disk(const std::string& content, const std::string& t
     std::string fileName = sha1_hash.substr(2);
     std::filesystem::path objDir = std::filesystem::path(".git") / "objects" / dirName;
     
-    // Check if object already exists to avoid overwriting (optional but good practice)
     if (!std::filesystem::exists(objDir / fileName)) {
         std::filesystem::create_directories(objDir);
         std::ofstream outFile(objDir / fileName, std::ios::binary);
@@ -144,8 +144,6 @@ std::string write_tree_recursive(const std::filesystem::path& current_path) {
 
     for (const auto& entry : std::filesystem::directory_iterator(current_path)) {
         std::string name = entry.path().filename().string();
-        
-        // Ignore .git directory
         if (name == ".git") continue;
 
         TreeEntry tree_entry;
@@ -155,7 +153,6 @@ std::string write_tree_recursive(const std::filesystem::path& current_path) {
             tree_entry.mode = "40000";
             tree_entry.sha_hex = write_tree_recursive(entry.path());
         } else {
-            // Check for executable permission
             auto perms = entry.status().permissions();
             bool is_exec = (perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none;
             tree_entry.mode = is_exec ? "100755" : "100644";
@@ -164,12 +161,10 @@ std::string write_tree_recursive(const std::filesystem::path& current_path) {
         entries.push_back(tree_entry);
     }
 
-    // Sort entries alphabetically by name
     std::sort(entries.begin(), entries.end());
 
     std::string tree_content;
     for (const auto& e : entries) {
-        // Format: <mode> <name>\0<20_byte_sha>
         tree_content += e.mode + " " + e.name + '\0' + hex_to_raw(e.sha_hex);
     }
 
@@ -252,7 +247,6 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        // Use the new reusable function
         std::string sha = create_blob(inputPath);
         std::cout << sha << "\n";
     }
@@ -304,6 +298,49 @@ int main(int argc, char *argv[])
             std::cerr << e.what() << '\n';
             return EXIT_FAILURE;
         }
+    }
+    else if (command == "commit-tree") {
+        // Usage: git commit-tree <tree_sha> [-p <parent_sha>] -m <message>
+        if (argc < 4) {
+             std::cerr << "Usage: git commit-tree <tree_sha> [-p <parent_sha>] -m <message>\n";
+             return EXIT_FAILURE;
+        }
+
+        std::string tree_sha = argv[2];
+        std::string parent_sha;
+        std::string message;
+
+        // Parse arguments flexibly
+        for (int i = 3; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "-p" && i + 1 < argc) {
+                parent_sha = argv[++i];
+            } else if (arg == "-m" && i + 1 < argc) {
+                message = argv[++i];
+            }
+        }
+
+        if (message.empty()) {
+            std::cerr << "Error: Commit message required (-m)\n";
+            return EXIT_FAILURE;
+        }
+
+        std::stringstream commit_content;
+        commit_content << "tree " << tree_sha << "\n";
+        if (!parent_sha.empty()) {
+            commit_content << "parent " << parent_sha << "\n";
+        }
+
+        std::time_t now = std::time(nullptr);
+        std::string author_info = "CodeCrafters <git@codecrafters.io> " + std::to_string(now) + " +0000";
+
+        commit_content << "author " << author_info << "\n";
+        commit_content << "committer " << author_info << "\n";
+        commit_content << "\n";
+        commit_content << message << "\n";
+
+        std::string sha = save_object_to_disk(commit_content.str(), "commit");
+        std::cout << sha << "\n";
     }
     else {
         std::cerr << "Unknown command " << command << '\n';
