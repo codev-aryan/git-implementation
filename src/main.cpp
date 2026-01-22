@@ -14,7 +14,6 @@ std::string compress_string(const std::string& data) {
     zs.zfree = Z_NULL;
     zs.opaque = Z_NULL;
     
-    // Z_DEFAULT_COMPRESSION is standard for Git
     if (deflateInit(&zs, Z_DEFAULT_COMPRESSION) != Z_OK) {
         throw std::runtime_error("Failed to initialize zlib compression");
     }
@@ -169,21 +168,15 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        // 1. Read file content
         std::ifstream file(inputPath, std::ios::binary);
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-        // 2. Prepare the object (header + content)
         std::string header = "blob " + std::to_string(content.size()) + '\0';
         std::string full_object = header + content;
 
-        // 3. Calculate SHA-1 Hash
         std::string sha1_hash = calculate_sha1(full_object);
-
-        // 4. Compress the object
         std::string compressed_data = compress_string(full_object);
 
-        // 5. Write to .git/objects
         std::string dirName = sha1_hash.substr(0, 2);
         std::string fileName = sha1_hash.substr(2);
         std::filesystem::path objDir = std::filesystem::path(".git") / "objects" / dirName;
@@ -193,8 +186,59 @@ int main(int argc, char *argv[])
         outFile.write(compressed_data.data(), compressed_data.size());
         outFile.close();
 
-        // 6. Print Hash
         std::cout << sha1_hash << "\n";
+    }
+    else if (command == "ls-tree") {
+        if (argc < 4 || std::string(argv[2]) != "--name-only") {
+             std::cerr << "Usage: git ls-tree --name-only <tree_sha>\n";
+             return EXIT_FAILURE;
+        }
+
+        std::string hash = argv[3];
+        std::string dirName = hash.substr(0, 2);
+        std::string fileName = hash.substr(2);
+        std::filesystem::path objectPath = std::filesystem::path(".git") / "objects" / dirName / fileName;
+
+        std::ifstream file(objectPath, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Error: Object not found at " << objectPath << "\n";
+            return EXIT_FAILURE;
+        }
+        std::string compressed_content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+        try {
+            std::string full_content = decompress_object(compressed_content);
+            
+            // Format: tree <size>\0<mode> <name>\0<20_byte_sha>...
+            
+            // 1. Skip the header (tree <size>\0)
+            size_t null_pos = full_content.find('\0');
+            if (null_pos == std::string::npos) return EXIT_FAILURE;
+            
+            size_t cursor = null_pos + 1;
+
+            // 2. Parse entries
+            while (cursor < full_content.size()) {
+                // Find the space between mode and name
+                size_t space_pos = full_content.find(' ', cursor);
+                if (space_pos == std::string::npos) break;
+                
+                // Find the null terminator after name
+                size_t name_end_pos = full_content.find('\0', space_pos + 1);
+                if (name_end_pos == std::string::npos) break;
+
+                // Extract name
+                std::string name = full_content.substr(space_pos + 1, name_end_pos - (space_pos + 1));
+                std::cout << name << "\n";
+
+                // Move cursor past the name, the null byte, and the 20-byte SHA
+                cursor = name_end_pos + 1 + 20; 
+            }
+
+        } catch (const std::exception& e) {
+            std::cerr << "Error decompressing object: " << e.what() << "\n";
+            return EXIT_FAILURE;
+        }
     }
     else {
         std::cerr << "Unknown command " << command << '\n';
