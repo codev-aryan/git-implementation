@@ -5,8 +5,11 @@
 #include <vector>
 #include <iomanip>
 #include <sstream>
+#include <algorithm>
 #include <zlib.h>
 #include <openssl/sha.h>
+
+// --- Helper Functions ---
 
 std::string compress_string(const std::string& data) {
     z_stream zs;
@@ -37,11 +40,6 @@ std::string compress_string(const std::string& data) {
     } while (ret == Z_OK);
 
     deflateEnd(&zs);
-
-    if (ret != Z_STREAM_END) {
-        throw std::runtime_error("Zlib compression failed");
-    }
-
     return compressed_data;
 }
 
@@ -73,11 +71,6 @@ std::string decompress_object(const std::string& compressed_data) {
     } while (ret == Z_OK);
 
     inflateEnd(&zs);
-
-    if (ret != Z_STREAM_END) {
-        throw std::runtime_error("Zlib decompression incomplete");
-    }
-
     return decompressed_data;
 }
 
@@ -92,6 +85,98 @@ std::string calculate_sha1(const std::string& input) {
     }
     return ss.str();
 }
+
+std::string hex_to_raw(const std::string& hex) {
+    std::string raw;
+    raw.reserve(20);
+    for (size_t i = 0; i < hex.length(); i += 2) {
+        std::string byteString = hex.substr(i, 2);
+        char byte = (char)strtol(byteString.c_str(), nullptr, 16);
+        raw.push_back(byte);
+    }
+    return raw;
+}
+
+// Helper to write any object (blob or tree) to .git/objects
+// Returns the SHA hash of the written object
+std::string save_object_to_disk(const std::string& content, const std::string& type) {
+    std::string header = type + " " + std::to_string(content.size()) + '\0';
+    std::string full_object = header + content;
+
+    std::string sha1_hash = calculate_sha1(full_object);
+    std::string compressed_data = compress_string(full_object);
+
+    std::string dirName = sha1_hash.substr(0, 2);
+    std::string fileName = sha1_hash.substr(2);
+    std::filesystem::path objDir = std::filesystem::path(".git") / "objects" / dirName;
+    
+    // Check if object already exists to avoid overwriting (optional but good practice)
+    if (!std::filesystem::exists(objDir / fileName)) {
+        std::filesystem::create_directories(objDir);
+        std::ofstream outFile(objDir / fileName, std::ios::binary);
+        outFile.write(compressed_data.data(), compressed_data.size());
+        outFile.close();
+    }
+
+    return sha1_hash;
+}
+
+// --- Specific Object Handlers ---
+
+std::string create_blob(const std::filesystem::path& filepath) {
+    std::ifstream file(filepath, std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return save_object_to_disk(content, "blob");
+}
+
+struct TreeEntry {
+    std::string name;
+    std::string sha_hex;
+    std::string mode;
+    
+    bool operator<(const TreeEntry& other) const {
+        return name < other.name;
+    }
+};
+
+std::string write_tree_recursive(const std::filesystem::path& current_path) {
+    std::vector<TreeEntry> entries;
+
+    for (const auto& entry : std::filesystem::directory_iterator(current_path)) {
+        std::string name = entry.path().filename().string();
+        
+        // Ignore .git directory
+        if (name == ".git") continue;
+
+        TreeEntry tree_entry;
+        tree_entry.name = name;
+
+        if (entry.is_directory()) {
+            tree_entry.mode = "40000";
+            tree_entry.sha_hex = write_tree_recursive(entry.path());
+        } else {
+            // Check for executable permission
+            auto perms = entry.status().permissions();
+            bool is_exec = (perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none;
+            tree_entry.mode = is_exec ? "100755" : "100644";
+            tree_entry.sha_hex = create_blob(entry.path());
+        }
+        entries.push_back(tree_entry);
+    }
+
+    // Sort entries alphabetically by name
+    std::sort(entries.begin(), entries.end());
+
+    std::string tree_content;
+    for (const auto& e : entries) {
+        // Format: <mode> <name>\0<20_byte_sha>
+        tree_content += e.mode + " " + e.name + '\0' + hex_to_raw(e.sha_hex);
+    }
+
+    return save_object_to_disk(tree_content, "tree");
+}
+
+// --- Main ---
 
 int main(int argc, char *argv[])
 {
@@ -148,8 +233,7 @@ int main(int argc, char *argv[])
             std::string full_content = decompress_object(compressed_content);
             size_t null_pos = full_content.find('\0');
             if (null_pos != std::string::npos) {
-                std::string blob_content = full_content.substr(null_pos + 1);
-                std::cout << blob_content;
+                std::cout << full_content.substr(null_pos + 1);
             }
         } catch (const std::exception& e) {
             std::cerr << "Error decompressing object: " << e.what() << "\n";
@@ -168,25 +252,9 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        std::ifstream file(inputPath, std::ios::binary);
-        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-        std::string header = "blob " + std::to_string(content.size()) + '\0';
-        std::string full_object = header + content;
-
-        std::string sha1_hash = calculate_sha1(full_object);
-        std::string compressed_data = compress_string(full_object);
-
-        std::string dirName = sha1_hash.substr(0, 2);
-        std::string fileName = sha1_hash.substr(2);
-        std::filesystem::path objDir = std::filesystem::path(".git") / "objects" / dirName;
-        std::filesystem::create_directories(objDir);
-
-        std::ofstream outFile(objDir / fileName, std::ios::binary);
-        outFile.write(compressed_data.data(), compressed_data.size());
-        outFile.close();
-
-        std::cout << sha1_hash << "\n";
+        // Use the new reusable function
+        std::string sha = create_blob(inputPath);
+        std::cout << sha << "\n";
     }
     else if (command == "ls-tree") {
         if (argc < 4 || std::string(argv[2]) != "--name-only") {
@@ -208,35 +276,32 @@ int main(int argc, char *argv[])
 
         try {
             std::string full_content = decompress_object(compressed_content);
-            
-            // Format: tree <size>\0<mode> <name>\0<20_byte_sha>...
-            
-            // 1. Skip the header (tree <size>\0)
             size_t null_pos = full_content.find('\0');
             if (null_pos == std::string::npos) return EXIT_FAILURE;
-            
             size_t cursor = null_pos + 1;
 
-            // 2. Parse entries
             while (cursor < full_content.size()) {
-                // Find the space between mode and name
                 size_t space_pos = full_content.find(' ', cursor);
                 if (space_pos == std::string::npos) break;
                 
-                // Find the null terminator after name
                 size_t name_end_pos = full_content.find('\0', space_pos + 1);
                 if (name_end_pos == std::string::npos) break;
 
-                // Extract name
                 std::string name = full_content.substr(space_pos + 1, name_end_pos - (space_pos + 1));
                 std::cout << name << "\n";
-
-                // Move cursor past the name, the null byte, and the 20-byte SHA
                 cursor = name_end_pos + 1 + 20; 
             }
-
         } catch (const std::exception& e) {
             std::cerr << "Error decompressing object: " << e.what() << "\n";
+            return EXIT_FAILURE;
+        }
+    }
+    else if (command == "write-tree") {
+        try {
+            std::string sha = write_tree_recursive(std::filesystem::current_path());
+            std::cout << sha << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << '\n';
             return EXIT_FAILURE;
         }
     }
