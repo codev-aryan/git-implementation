@@ -108,10 +108,10 @@ namespace Repository {
         content << "tree " << tree_sha << "\n";
         if (!parent_sha.empty()) content << "parent " << parent_sha << "\n";
         std::time_t now = std::time(nullptr);
-        // Note: Using a fixed author for consistent output or dynamic if preferred. 
-        // Keeping original user string:
-        content << "author CodeCrafters <git@codecrafters.io> " << now << " +0000\n";
-        content << "committer CodeCrafters <git@codecrafters.io> " << now << " +0000\n\n";
+        
+        content << "author codev-aryan <codev-aryan@example.com> " << now << " +0000\n";
+        content << "committer codev-aryan <codev-aryan@example.com> " << now << " +0000\n\n";
+        
         content << message << "\n";
         return save_object_to_disk(content.str(), "commit");
     }
